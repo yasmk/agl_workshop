@@ -99,6 +99,11 @@ spark.sql(f"USE {database_name};")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## More environment/data setup
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC 
 # MAGIC We already have seen store locations dataset. Let's redo the work this time using suggested Delta Architecture steps
 
@@ -226,6 +231,11 @@ silver_df.write \
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## More prep!!!! (prep for first run)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC 
 # MAGIC Prepare for the first autoloader run - as this is an example Notebook, we can delete all the files and tables before running it.
 
@@ -258,16 +268,22 @@ if refresh_autoloader_datasets:
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Autoloader for batch processing (take note of trigger(once=True))
+
+# COMMAND ----------
+
 # Set up the stream to begin reading incoming files from the autoloader_ingest_path location.
-df = spark.readStream.format('cloudFiles') \
+input_df = spark.readStream.format('cloudFiles') \
   .option('cloudFiles.format', 'json') \
   .option("cloudFiles.schemaHints", "ts long, exported_ts long, SaleID string") \
   .option('cloudFiles.schemaLocation', schema_path) \
-  .load(autoloader_ingest_path) \
-  .withColumn("file_path",F.input_file_name()) \
+  .load(autoloader_ingest_path) 
+
+result_df = input_df.withColumn("file_path",F.input_file_name()) \
   .withColumn("inserted_at", F.current_timestamp()) 
 
-batch_autoloader = df.writeStream \
+batch_autoloader = result_df.writeStream \
   .format('delta') \
   .option('checkpointLocation', checkpoint_path) \
   .option("mergeSchema", "true") \
@@ -294,14 +310,55 @@ spark.sql(f"create table if not exists bronze_sales location '{write_path}'")
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC %md 
+# MAGIC # Load more files and re-run the batch autoloader
 # MAGIC 
 # MAGIC If we have new data files arriving - rerunning autoloader cell will only process those yet unseen files. 
-# MAGIC You can try it out by running `get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-01')` and then re-running autoloader cell.
+# MAGIC You can try it out by running `get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-01')` 
 
 # COMMAND ----------
 
-get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-01')
+get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-01')  # helper function to load more data
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC 
+# MAGIC describe history bronze_sales;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC and then re-running autoloader (for batch).
+
+# COMMAND ----------
+
+# Set up the stream to begin reading incoming files from the autoloader_ingest_path location.
+input_df = spark.readStream.format('cloudFiles') \
+  .option('cloudFiles.format', 'json') \
+  .option("cloudFiles.schemaHints", "ts long, exported_ts long, SaleID string") \
+  .option('cloudFiles.schemaLocation', schema_path) \
+  .load(autoloader_ingest_path) 
+
+result_df = input_df.withColumn("file_path",F.input_file_name()) \
+  .withColumn("inserted_at", F.current_timestamp()) 
+
+batch_autoloader = result_df.writeStream \
+  .format('delta') \
+  .option('checkpointLocation', checkpoint_path) \
+  .option("mergeSchema", "true") \
+  .trigger(once=True) \
+  .start(write_path)
+
+batch_autoloader.awaitTermination()
+
+spark.sql(f"create table if not exists bronze_sales location '{write_path}'")
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC 
+# MAGIC describe history bronze_sales;
 
 # COMMAND ----------
 
@@ -318,6 +375,11 @@ get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-01')
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Autoloader for streaming
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC 
 # MAGIC You can schedule autoloder to run on required schedule (e.g. every night) and it will always process files uploaded since last run.
 # MAGIC 
@@ -328,16 +390,18 @@ get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-01')
 # COMMAND ----------
 
 # Set up the stream to begin reading incoming files from the autoloader_ingest_path location.
-df = spark.readStream.format('cloudFiles') \
+input_df = spark.readStream.format('cloudFiles') \
   .option('cloudFiles.format', 'json') \
   .option("cloudFiles.schemaHints", "ts long, exported_ts long, SaleID string") \
   .option('cloudFiles.schemaLocation', schema_path) \
-  .load(autoloader_ingest_path) \
-  .withColumn("file_path",F.input_file_name()) \
+  .load(autoloader_ingest_path) 
+
+
+result_df = input_df.withColumn("file_path",F.input_file_name()) \
   .withColumn("inserted_at", F.current_timestamp()) 
 
 
-streaming_autoloader = df.writeStream \
+streaming_autoloader = result_df.writeStream \
   .format('delta') \
   .option('checkpointLocation', checkpoint_path) \
   .option("mergeSchema", "true") \
@@ -346,7 +410,7 @@ streaming_autoloader = df.writeStream \
 
 # COMMAND ----------
 
-get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-02')
+get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-02')  #helper function to upload more data
 
 # COMMAND ----------
 
@@ -360,11 +424,16 @@ get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-02')
 
 # MAGIC %md
 # MAGIC 
-# MAGIC ### Silver Tables
+# MAGIC ### Silver Tables (silver_sales and silver_sale_items)
 # MAGIC 
 # MAGIC Now that we have a bronze table ready - let's a create silver one! 
 # MAGIC 
 # MAGIC We can start by using same approach as for the dimension tables earlier - clean and de-duplicate data from bronze table, rename columns to be more business friendly and save it as silver table.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Create a view based on the Bornze table to clean/filter the data then build the silver table using the query.  (can define CTE, ...)
 
 # COMMAND ----------
 
@@ -403,6 +472,11 @@ get_incremental_data(autoloader_ingest_path, 'SYD01','2022-01-02')
 # MAGIC   sha2(concat_ws(*, '||'), 256) as row_hash -- add a hash of all values to easily pick up changed rows
 # MAGIC from
 # MAGIC   newest_records
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC create first silver table silver_sales using the above query
 
 # COMMAND ----------
 
@@ -458,6 +532,11 @@ select * from v_silver_sales;
 # MAGIC   sha2(concat_ws(*, '||'), 256) as row_hash
 # MAGIC from
 # MAGIC   all_records
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC create first silver table silver_sale_items using the above query
 
 # COMMAND ----------
 
@@ -545,7 +624,7 @@ else:
 
 # COMMAND ----------
 
-get_fixed_records_data(autoloader_ingest_path, 'SYD01','2022-01-01')
+get_fixed_records_data(autoloader_ingest_path, 'SYD01','2022-01-01')   # add more data
 
 # COMMAND ----------
 
@@ -658,7 +737,7 @@ get_fixed_records_data(autoloader_ingest_path, 'SYD01','2022-01-01')
 
 # MAGIC %md
 # MAGIC 
-# MAGIC Stop streaming autoloader to allow our cluster to shut down.
+# MAGIC ## Stop streaming autoloader to allow our cluster to shut down.
 
 # COMMAND ----------
 
